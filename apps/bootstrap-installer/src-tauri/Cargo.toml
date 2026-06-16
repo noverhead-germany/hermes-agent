@@ -23,6 +23,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+time = { version = "0.3", features = ["formatting", "macros"] }
 
 [dependencies]
 # Tauri runtime + plugins

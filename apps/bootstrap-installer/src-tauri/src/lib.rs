@@ -18,6 +18,14 @@ mod update;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildInfo {
+    version: &'static str,
+    commit: &'static str,
+    built_at: &'static str,
+}
+
 /// How the installer was invoked. Resolved once from the process args in
 /// `run()` and exposed to the frontend via `get_mode` so it can route to the
 /// install flow (first-run onboarding) or the update flow (driven by the
@@ -89,6 +97,16 @@ impl AppState {
 #[tauri::command]
 fn get_mode(state: tauri::State<'_, Arc<AppState>>) -> AppMode {
     state.mode
+}
+
+/// Frontend diagnostics footer: exact installer build that produced this EXE.
+#[tauri::command]
+fn get_build_info() -> BuildInfo {
+    BuildInfo {
+        version: option_env!("HERMES_INSTALLER_VERSION").unwrap_or("dev"),
+        commit: option_env!("HERMES_INSTALLER_COMMIT").unwrap_or("unknown"),
+        built_at: option_env!("HERMES_INSTALLER_BUILT_AT").unwrap_or("unknown"),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -177,6 +195,7 @@ pub fn run() {
             // Hand-off
             bootstrap::launch_hermes_desktop,
             // Diagnostics
+            get_build_info,
             paths::get_log_path,
             paths::get_hermes_home,
             paths::open_log_dir,

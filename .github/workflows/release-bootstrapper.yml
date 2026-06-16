@@ -63,6 +63,13 @@ jobs:
         working-directory: apps/bootstrap-installer/src-tauri
         run: cargo update -p time --precise 0.3.47
 
+      - name: Set installer build metadata
+        shell: pwsh
+        run: |
+          "HERMES_INSTALLER_VERSION=${{ steps.channel.outputs.tag }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "HERMES_INSTALLER_COMMIT=$((git rev-parse --short=9 HEAD).Trim())" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "HERMES_INSTALLER_BUILT_AT=$([DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build bootstrapper
         working-directory: apps/bootstrap-installer
         run: npm run tauri:build
@@ -75,11 +82,21 @@ jobs:
             throw "Missing setup exe: $path"
           }
 
+      - name: Generate setup metadata
+        shell: pwsh
+        run: |
+          ./scripts/generate-setup-metadata.ps1 `
+            -SetupPath "apps/bootstrap-installer/src-tauri/target/release/NOverhead-Agent-Desktop-Setup.exe" `
+            -Version "${{ steps.channel.outputs.tag }}" `
+            -Channel "$(if ('${{ steps.channel.outputs.prerelease }}' -eq 'true') { 'prerelease' } else { 'stable' })"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: NOverhead Agent Desktop ${{ steps.channel.outputs.tag }}
           tag_name: ${{ steps.channel.outputs.tag }}
-          files: apps/bootstrap-installer/src-tauri/target/release/NOverhead-Agent-Desktop-Setup.exe
+          files: |
+            apps/bootstrap-installer/src-tauri/target/release/NOverhead-Agent-Desktop-Setup.exe
+            apps/bootstrap-installer/src-tauri/target/release/setup-metadata.json
           generate_release_notes: true
           prerelease: ${{ steps.channel.outputs.prerelease }}

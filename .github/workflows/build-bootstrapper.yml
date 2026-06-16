@@ -32,12 +32,33 @@ jobs:
         working-directory: apps/bootstrap-installer/src-tauri
         run: cargo update -p time --precise 0.3.47
 
+      - name: Set installer build metadata
+        shell: pwsh
+        run: |
+          "HERMES_INSTALLER_VERSION=dev" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "HERMES_INSTALLER_COMMIT=$((git rev-parse --short=9 HEAD).Trim())" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "HERMES_INSTALLER_BUILT_AT=$([DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build bootstrapper
         working-directory: apps/bootstrap-installer
         run: npm run tauri:build
+
+      - name: Generate setup metadata
+        shell: pwsh
+        run: |
+          ./scripts/generate-setup-metadata.ps1 `
+            -SetupPath "apps/bootstrap-installer/src-tauri/target/release/NOverhead-Agent-Desktop-Setup.exe" `
+            -Version "${{ github.ref_name }}" `
+            -Channel "branch"
 
       - name: Upload setup exe
         uses: actions/upload-artifact@v4
         with:
           name: NOverhead-Agent-Desktop-Setup
           path: apps/bootstrap-installer/src-tauri/target/release/NOverhead-Agent-Desktop-Setup.exe
+
+      - name: Upload setup metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOverhead-Agent-Desktop-Setup-metadata
+          path: apps/bootstrap-installer/src-tauri/target/release/setup-metadata.json

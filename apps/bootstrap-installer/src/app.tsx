@@ -5,6 +5,7 @@ import Welcome from './routes/welcome'
 import Progress from './routes/progress'
 import Success from './routes/success'
 import Failure from './routes/failure'
+import BuildInfoFooter from './components/build-info'
 
 /*
  * App shell — Hermes Setup.
@@ -30,6 +31,7 @@ export default function App() {
         {route === 'success' && <Success />}
         {route === 'failure' && <Failure bootstrap={bootstrap} />}
       </main>
+      <BuildInfoFooter />
     </div>
   )
 }

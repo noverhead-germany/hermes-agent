@@ -45,6 +45,12 @@ export interface BootstrapStateModel {
   logs: Array<{ stage?: string; line: string; stream?: 'stdout' | 'stderr' }>
 }
 
+export interface BuildInfo {
+  version: string
+  commit: string
+  builtAt: string
+}
+
 const INITIAL: BootstrapStateModel = {
   status: 'idle',
   protocolVersion: null,
@@ -72,6 +78,7 @@ export const $mode = atom<AppMode>('install')
 export const $bootstrap = atom<BootstrapStateModel>(INITIAL)
 export const $logPath = atom<string | null>(null)
 export const $hermesHome = atom<string | null>(null)
+export const $buildInfo = atom<BuildInfo | null>(null)
 
 export const $progress = computed($bootstrap, (b) => {
   const total = b.stageOrder.length
@@ -135,14 +142,16 @@ export async function initialize(): Promise<void> {
 
   // Pull static info on mount for the diagnostics footer.
   try {
-    const [logPath, hermesHome, mode] = await Promise.all([
+    const [logPath, hermesHome, mode, buildInfo] = await Promise.all([
       invoke<string>('get_log_path'),
       invoke<string>('get_hermes_home'),
-      invoke<AppMode>('get_mode')
+      invoke<AppMode>('get_mode'),
+      invoke<BuildInfo>('get_build_info')
     ])
     $logPath.set(logPath)
     $hermesHome.set(hermesHome)
     $mode.set(mode)
+    $buildInfo.set(buildInfo)
   } catch (err) {
     console.warn('failed to fetch installer paths', err)
   }

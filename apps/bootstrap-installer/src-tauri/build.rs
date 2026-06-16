@@ -1,4 +1,6 @@
 use std::process::Command;
+use time::macros::format_description;
+use time::OffsetDateTime;
 
 fn main() {
     // -----------------------------------------------------------------
@@ -35,6 +37,9 @@ fn main() {
 
     let commit = resolve_commit_pin();
     let branch = resolve_branch_pin();
+    let installer_version = resolve_installer_version();
+    let installer_commit = resolve_short_commit();
+    let installer_built_at = resolve_built_at();
 
     if let Some(c) = &commit {
         println!("cargo:rustc-env=BUILD_PIN_COMMIT={c}");
@@ -53,6 +58,13 @@ fn main() {
             ),
         }
     }
+    println!("cargo:rustc-env=HERMES_INSTALLER_VERSION={installer_version}");
+    println!("cargo:rustc-env=HERMES_INSTALLER_COMMIT={installer_commit}");
+    println!("cargo:rustc-env=HERMES_INSTALLER_BUILT_AT={installer_built_at}");
+    println!(
+        "cargo:warning=hermes-bootstrap: installer build info version={} commit={} built_at={}",
+        installer_version, installer_commit, installer_built_at
+    );
     // Rerun build.rs when HEAD moves. With branch-follow as the default the
     // baked commit no longer changes per-commit, but a branch *switch* changes
     // the detected branch name, so we still re-trigger. When an explicit
@@ -70,9 +82,14 @@ fn main() {
                 println!("cargo:rerun-if-changed={}/{}", gd.display(), rest);
             }
         }
+        println!("cargo:rerun-if-changed={}/packed-refs", gd.display());
+        println!("cargo:rerun-if-changed={}/refs/tags", gd.display());
     }
     println!("cargo:rerun-if-env-changed=HERMES_BUILD_PIN_COMMIT");
     println!("cargo:rerun-if-env-changed=HERMES_BUILD_PIN_BRANCH");
+    println!("cargo:rerun-if-env-changed=HERMES_INSTALLER_VERSION");
+    println!("cargo:rerun-if-env-changed=HERMES_INSTALLER_COMMIT");
+    println!("cargo:rerun-if-env-changed=HERMES_INSTALLER_BUILT_AT");
 
     // -----------------------------------------------------------------
     // Tauri windows manifest. See hermes-setup.manifest for rationale —
@@ -90,6 +107,59 @@ fn main() {
     let attrs = tauri_build::Attributes::new();
 
     tauri_build::try_build(attrs).expect("failed to run tauri-build");
+}
+
+fn resolve_installer_version() -> String {
+    if let Some(v) = env_var("HERMES_INSTALLER_VERSION") {
+        return v;
+    }
+    if let Some(tag) = git_output(&["describe", "--tags", "--exact-match", "HEAD"]) {
+        return tag;
+    }
+    match std::env::var("CARGO_PKG_VERSION") {
+        Ok(v) if !v.trim().is_empty() && v.trim() != "0.0.1" => v.trim().to_string(),
+        _ => "dev".to_string(),
+    }
+}
+
+fn resolve_short_commit() -> String {
+    if let Some(commit) = env_var("HERMES_INSTALLER_COMMIT") {
+        return commit;
+    }
+    git_output(&["rev-parse", "--short=9", "HEAD"]).unwrap_or_else(|| "unknown".to_string())
+}
+
+fn resolve_built_at() -> String {
+    if let Some(built_at) = env_var("HERMES_INSTALLER_BUILT_AT") {
+        return built_at;
+    }
+    OffsetDateTime::now_utc()
+        .format(&format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z"))
+        .expect("failed to format UTC build timestamp")
+}
+
+fn env_var(name: &str) -> Option<String> {
+    let value = std::env::var(name).ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let out = Command::new("git").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(out.stdout).ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn resolve_commit_pin() -> Option<String> {
