@@ -19,6 +19,8 @@ use tokio::io::AsyncWriteExt;
 
 use crate::paths;
 
+pub const DEFAULT_INSTALL_SCRIPT_BRANCH: &str = "main";
+
 /// Identity of the install.ps1 we'll execute. Used by both the manifest
 /// fetch and the per-stage runs.
 #[derive(Debug, Clone)]
@@ -33,6 +35,7 @@ pub struct ResolvedScript {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptSource {
+    LocalPath,
     DevCheckout,
     Bundled,
     Cached,
@@ -79,9 +82,36 @@ pub async fn resolve(
     pin: &Pin,
     emit_log: &impl Fn(&str),
 ) -> Result<ResolvedScript> {
-    // 1. Dev shortcut.
+    // 1. Explicit local script path override.
+    if let Ok(script_path) = std::env::var("HERMES_SETUP_SCRIPT_PATH") {
+        let candidate = PathBuf::from(script_path.trim());
+        if script_path.trim().is_empty() {
+            return Err(anyhow!("HERMES_SETUP_SCRIPT_PATH was set but empty"));
+        }
+        if !candidate.exists() {
+            return Err(anyhow!(
+                "explicit install script path does not exist: {}",
+                candidate.display()
+            ));
+        }
+        emit_log(&format!(
+            "[bootstrap] local override — using explicit {} path {}",
+            kind.filename(),
+            candidate.display()
+        ));
+        return Ok(ResolvedScript {
+            path: candidate,
+            source: ScriptSource::LocalPath,
+            commit: pin.commit.clone(),
+            branch: pin.branch.clone(),
+        });
+    }
+
+    // 2. Dev shortcut.
     if let Ok(repo_root) = std::env::var("HERMES_SETUP_DEV_REPO_ROOT") {
-        let candidate = PathBuf::from(repo_root).join("scripts").join(kind.filename());
+        let candidate = PathBuf::from(repo_root)
+            .join("scripts")
+            .join(kind.filename());
         if candidate.exists() {
             emit_log(&format!(
                 "[bootstrap] dev mode — using local {} at {}",
@@ -97,9 +127,9 @@ pub async fn resolve(
         }
     }
 
-    // 2. (Not implemented) bundled fallback.
+    // 3. (Not implemented) bundled fallback.
 
-    // 3. Network. Pin must be a real commit or a branch ref.
+    // 4. Network. Pin must be a real commit or a branch ref.
     let commit_or_ref = match (&pin.commit, &pin.branch) {
         (Some(c), _) if is_valid_commit(c) => c.clone(),
         (_, Some(b)) if !b.trim().is_empty() => b.clone(),
@@ -195,9 +225,8 @@ async fn download(kind: ScriptKind, commit_or_ref: &str, dest_path: &Path) -> Re
     );
 
     if let Some(parent) = dest_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("creating bootstrap-cache parent dir {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating bootstrap-cache parent dir {}", parent.display()))?;
     }
 
     let tmp_path = dest_path.with_extension({
@@ -240,13 +269,7 @@ async fn download(kind: ScriptKind, commit_or_ref: &str, dest_path: &Path) -> Re
 
     tokio::fs::rename(&tmp_path, dest_path)
         .await
-        .with_context(|| {
-            format!(
-                "renaming {} → {}",
-                tmp_path.display(),
-                dest_path.display()
-            )
-        })?;
+        .with_context(|| format!("renaming {} → {}", tmp_path.display(), dest_path.display()))?;
 
     Ok(())
 }
@@ -254,6 +277,24 @@ async fn download(kind: ScriptKind, commit_or_ref: &str, dest_path: &Path) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn with_env_var_async<T>(
+        key: &str,
+        value: Option<&str>,
+        f: impl std::future::Future<Output = T>,
+    ) -> T {
+        let old = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let out = f.await;
+        match old {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        out
+    }
 
     #[test]
     fn is_valid_commit_accepts_short_and_full_shas() {
@@ -269,5 +310,31 @@ mod tests {
         assert_eq!(sanitize_ref("bb/gui"), "bb_gui");
         assert_eq!(sanitize_ref("main"), "main");
         assert_eq!(sanitize_ref("release/1.2.3"), "release_1.2.3");
+    }
+
+    #[tokio::test]
+    async fn explicit_local_script_path_resolves_without_pin() {
+        let temp = std::env::temp_dir().join(format!(
+            "hermes-bootstrap-local-script-{}-{}.ps1",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&temp, "Write-Host 'ok'").unwrap();
+
+        let result = with_env_var_async(
+            "HERMES_SETUP_SCRIPT_PATH",
+            temp.to_str(),
+            resolve(ScriptKind::Ps1, &Pin::default(), &|_| {}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.source, ScriptSource::LocalPath);
+        assert_eq!(result.path, temp);
+
+        let _ = std::fs::remove_file(&temp);
     }
 }

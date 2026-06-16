@@ -24,8 +24,10 @@ fn main() {
     //   1. HERMES_BUILD_PIN_BRANCH, if set and non-empty.
     //   2. `git rev-parse --abbrev-ref HEAD` of the checkout this build.rs
     //      lives in — the current branch. (None on a detached HEAD.)
-    //   3. Last-resort fallback handled below: if neither commit nor branch
-    //      resolves, warn — the binary needs a runtime arg or dev-repo env.
+    //   3. Last-resort fallback: `main`. Release/tag builds frequently run on
+    //      detached HEAD checkouts, and producing an installer with no branch
+    //      pin dead-ends at runtime. Defaulting to `main` keeps the normal
+    //      installer path resolvable.
     //
     // Build script reruns on git HEAD change so a new commit triggers
     // a rebuild without `cargo clean`.
@@ -51,16 +53,6 @@ fn main() {
             ),
         }
     }
-    if commit.is_none() && branch.is_none() {
-        // Fail loudly rather than silently produce a binary that errors
-        // at runtime with "no install-script pin supplied". A build that
-        // can't resolve a pin almost certainly indicates a misconfigured
-        // build environment.
-        println!(
-            "cargo:warning=hermes-bootstrap: no pin resolved at build time; binary will fail at runtime without HERMES_SETUP_DEV_REPO_ROOT or runtime args"
-        );
-    }
-
     // Rerun build.rs when HEAD moves. With branch-follow as the default the
     // baked commit no longer changes per-commit, but a branch *switch* changes
     // the detected branch name, so we still re-trigger. When an explicit
@@ -149,18 +141,32 @@ fn resolve_branch_pin() -> Option<String> {
             return Some(v.trim().to_string());
         }
     }
-    let out = Command::new("git")
+    let out = match Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
-        .ok()?;
+    {
+        Ok(out) => out,
+        Err(_) => {
+            println!(
+                "cargo:warning=hermes-bootstrap: git unavailable during build; defaulting install-script branch pin to main"
+            );
+            return Some("main".to_string());
+        }
+    };
     if !out.status.success() {
-        return None;
+        println!(
+            "cargo:warning=hermes-bootstrap: git rev-parse failed during build; defaulting install-script branch pin to main"
+        );
+        return Some("main".to_string());
     }
     let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
     // "HEAD" is what you get on a detached checkout — no meaningful branch
     // to pin to. The commit pin still applies; just don't emit a branch.
     if s.is_empty() || s == "HEAD" {
-        None
+        println!(
+            "cargo:warning=hermes-bootstrap: detached HEAD build; defaulting install-script branch pin to main"
+        );
+        Some("main".to_string())
     } else {
         Some(s)
     }

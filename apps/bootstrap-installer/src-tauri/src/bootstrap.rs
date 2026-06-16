@@ -52,6 +52,15 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinSource {
+    RuntimeCommit,
+    RuntimeBranch,
+    BuildCommit,
+    BuildBranch,
+    DefaultMainBranch,
+}
+
 #[derive(Debug, Serialize)]
 pub struct BootstrapStatus {
     pub running: bool,
@@ -163,17 +172,18 @@ pub async fn get_bootstrap_status(
 /// (e.g. when Stage-Desktop was skipped) so the frontend can present
 /// actionable failure UI rather than silently doing nothing.
 #[tauri::command]
-pub async fn launch_hermes_desktop(
-    app: AppHandle,
-    install_root: String,
-) -> Result<(), String> {
+pub async fn launch_hermes_desktop(app: AppHandle, install_root: String) -> Result<(), String> {
     let install_root = PathBuf::from(install_root);
     let exe_path = resolve_hermes_desktop_exe(&install_root).ok_or_else(|| {
         format!(
             "Couldn't find a built Hermes desktop at {}. The desktop build step \
              may have been skipped or failed. Run `hermes desktop` from a \
              terminal to build and launch it.",
-            install_root.join("apps").join("desktop").join("release").display()
+            install_root
+                .join("apps")
+                .join("desktop")
+                .join("release")
+                .display()
         )
     })?;
 
@@ -191,12 +201,8 @@ pub async fn launch_hermes_desktop(
         cmd.creation_flags(0x0000_0008);
     }
 
-    cmd.spawn().map_err(|e| {
-        format!(
-            "failed to launch {}: {e}",
-            exe_path.display()
-        )
-    })?;
+    cmd.spawn()
+        .map_err(|e| format!("failed to launch {}: {e}", exe_path.display()))?;
 
     // Give Windows ~150ms to actually start the new process before we exit.
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -347,13 +353,11 @@ async fn run_bootstrap(
 ) -> Result<String> {
     let kind = ScriptKind::for_current_os();
 
-    let pin = Pin {
-        commit: args.commit.or_else(|| option_env_string("BUILD_PIN_COMMIT")),
-        branch: args.branch.or_else(|| option_env_string("BUILD_PIN_BRANCH")),
-    };
+    let (pin, pin_source) = resolve_install_script_pin(&args);
 
     tracing::info!(
         ?pin,
+        pin_source = %describe_pin_source(pin_source),
         kind = ?kind,
         include_desktop = args.include_desktop,
         "bootstrap starting"
@@ -392,15 +396,17 @@ async fn run_bootstrap(
         })?;
 
     let source_note = match &script.source {
+        ScriptSource::LocalPath => "local-path",
         ScriptSource::DevCheckout => "dev checkout",
         ScriptSource::Bundled => "bundled",
         ScriptSource::Cached => "cached",
         ScriptSource::Downloaded => "downloaded",
     };
     emit_log(&format!(
-        "[bootstrap] script {} via {}",
+        "[bootstrap] script {} via {} ({})",
         script.path.display(),
-        source_note
+        source_note,
+        describe_resolved_ref(&script)
     ));
 
     // 2. Fetch manifest
@@ -443,20 +449,21 @@ async fn run_bootstrap(
         return Err(anyhow!(err));
     }
 
-    let manifest: Manifest = powershell::parse_manifest(&manifest_result.stdout).ok_or_else(|| {
-        let err = format!(
-            "install.ps1 -Manifest produced no parseable JSON payload\n{}",
-            truncate(&manifest_result.stdout, 4000)
-        );
-        emit_event(
-            &app,
-            BootstrapEvent::Failed {
-                stage: None,
-                error: err.clone(),
-            },
-        );
-        anyhow!(err)
-    })?;
+    let manifest: Manifest =
+        powershell::parse_manifest(&manifest_result.stdout).ok_or_else(|| {
+            let err = format!(
+                "install.ps1 -Manifest produced no parseable JSON payload\n{}",
+                truncate(&manifest_result.stdout, 4000)
+            );
+            emit_event(
+                &app,
+                BootstrapEvent::Failed {
+                    stage: None,
+                    error: err.clone(),
+                },
+            );
+            anyhow!(err)
+        })?;
 
     emit_event(
         &app,
@@ -650,7 +657,10 @@ async fn run_bootstrap(
     // we're already running from that path. Best-effort — a failure here must
     // not fail an otherwise-successful install.
     if let Err(err) = crate::paths::copy_self_to_hermes_home() {
-        tracing::warn!(?err, "failed to copy installer into HERMES_HOME (non-fatal)");
+        tracing::warn!(
+            ?err,
+            "failed to copy installer into HERMES_HOME (non-fatal)"
+        );
         emit_log(&format!(
             "[bootstrap] warning: could not stage updater binary: {err}"
         ));
@@ -756,6 +766,100 @@ fn build_pin_args(script: &install_script::ResolvedScript) -> Vec<String> {
     out
 }
 
+fn resolve_install_script_pin(args: &StartBootstrapArgs) -> (Pin, PinSource) {
+    resolve_install_script_pin_with_build_defaults(
+        args,
+        option_env_string("BUILD_PIN_COMMIT"),
+        option_env_string("BUILD_PIN_BRANCH"),
+    )
+}
+
+fn resolve_install_script_pin_with_build_defaults(
+    args: &StartBootstrapArgs,
+    build_commit: Option<String>,
+    build_branch: Option<String>,
+) -> (Pin, PinSource) {
+    if let Some(commit) = args.commit.as_ref().and_then(|s| non_empty(s)) {
+        return (
+            Pin {
+                commit: Some(commit.to_string()),
+                branch: args
+                    .branch
+                    .as_ref()
+                    .and_then(|s| non_empty(s))
+                    .map(str::to_string),
+            },
+            PinSource::RuntimeCommit,
+        );
+    }
+    if let Some(branch) = args.branch.as_ref().and_then(|s| non_empty(s)) {
+        return (
+            Pin {
+                commit: None,
+                branch: Some(branch.to_string()),
+            },
+            PinSource::RuntimeBranch,
+        );
+    }
+    if let Some(commit) = build_commit.as_deref().and_then(non_empty) {
+        return (
+            Pin {
+                commit: Some(commit.to_string()),
+                branch: build_branch
+                    .as_deref()
+                    .and_then(non_empty)
+                    .map(str::to_string),
+            },
+            PinSource::BuildCommit,
+        );
+    }
+    if let Some(branch) = build_branch.as_deref().and_then(non_empty) {
+        return (
+            Pin {
+                commit: None,
+                branch: Some(branch.to_string()),
+            },
+            PinSource::BuildBranch,
+        );
+    }
+    (
+        Pin {
+            commit: None,
+            branch: Some(install_script::DEFAULT_INSTALL_SCRIPT_BRANCH.to_string()),
+        },
+        PinSource::DefaultMainBranch,
+    )
+}
+
+fn non_empty(s: &str) -> Option<&str> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn describe_pin_source(source: PinSource) -> &'static str {
+    match source {
+        PinSource::RuntimeCommit => "runtime-commit",
+        PinSource::RuntimeBranch => "runtime-branch",
+        PinSource::BuildCommit => "build-commit",
+        PinSource::BuildBranch => "build-branch",
+        PinSource::DefaultMainBranch => "default-main-branch",
+    }
+}
+
+fn describe_resolved_ref(script: &install_script::ResolvedScript) -> String {
+    if let Some(commit) = script.commit.as_deref().and_then(non_empty) {
+        format!("commit {}", truncate(commit, 12))
+    } else if let Some(branch) = script.branch.as_deref().and_then(non_empty) {
+        format!("branch {branch}")
+    } else {
+        "no pin".to_string()
+    }
+}
+
 fn emit_event(app: &AppHandle, event: BootstrapEvent) {
     // Tee important state transitions to the rolling installer log so
     // bootstrap-installer.log isn't just "starting" + final summary.
@@ -821,8 +925,8 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::path::Path;
+    use std::path::PathBuf;
 
     fn unique_tmp_dir(tag: &str) -> PathBuf {
         let base = std::env::temp_dir().join(format!(
@@ -863,6 +967,43 @@ mod tests {
             std::fs::write(&exe, b"stub").unwrap();
             exe
         }
+    }
+
+    #[test]
+    fn install_script_pin_defaults_to_main_branch() {
+        let (pin, source) = resolve_install_script_pin_with_build_defaults(
+            &StartBootstrapArgs {
+                commit: None,
+                branch: None,
+                include_desktop: true,
+                hermes_home: None,
+            },
+            None,
+            None,
+        );
+        assert_eq!(pin.commit, None);
+        assert_eq!(
+            pin.branch,
+            Some(install_script::DEFAULT_INSTALL_SCRIPT_BRANCH.to_string())
+        );
+        assert_eq!(source, PinSource::DefaultMainBranch);
+    }
+
+    #[test]
+    fn runtime_branch_beats_build_defaults() {
+        let (pin, source) = resolve_install_script_pin_with_build_defaults(
+            &StartBootstrapArgs {
+                commit: None,
+                branch: Some("release/test".into()),
+                include_desktop: true,
+                hermes_home: None,
+            },
+            Some("0123456789abcdef".into()),
+            Some("main".into()),
+        );
+        assert_eq!(pin.commit, None);
+        assert_eq!(pin.branch.as_deref(), Some("release/test"));
+        assert_eq!(source, PinSource::RuntimeBranch);
     }
 
     // The relaunch / install target is derived from the rebuilt desktop app.
